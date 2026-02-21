@@ -62,9 +62,9 @@ class PredictionModel:
         if self.ort_session is None:
             return np.zeros(2)
 
-        # Prepare input window (last 100 steps)
+        # Prepare input window (last 100 steps)/(last 50 steps )
         # The model was trained with a context window of 100
-        history_window = self.sequence_history[-100:]
+        history_window = self.sequence_history[-100:] # 1: change from 100 (score =0.259505) to 50 
         
         # Pad with zeros if history is shorter than 100 (should not happen for need_prediction=True starting at step 99)
         if len(history_window) < 100:
