@@ -9,7 +9,7 @@ sys.path.append(f"{CURRENT_DIR}")
 
 from utils import DataPoint #import DataPoint class from utils.py
 
-class LSTMPredictor(nn.Modulde):  #lstm model
+class LSTMPredictor(nn.Module):  #lstm model
     def __init__(self,input_size=FEATURES,hidden_size=64,num_layers=1):
         super().__init__()
         self.lstm=nn.LSTM(input_size=input_size,hidden_size=hidden_size,num_layers=num_layers,batch_first=True,) #lstm layer
@@ -31,7 +31,6 @@ class PredictionModel:
         self.sequence_history=[]
         self.model=None
         self.load_model()
-
 
 
    #
@@ -77,3 +76,7 @@ def predict(self,data_point:DataPoint)>np.ndarray | None: #fucntion can return e
         out=self.model(t)
     prediction=out[0].numpy().astype(np.float32)
     return prediction
+        
+
+
+
