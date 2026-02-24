@@ -1,82 +1,119 @@
+"""
+Submission entry point. Must define PredictionModel with predict(data_point).
+Uses same preprocessing and model as train.py (97 features, 2-layer LSTM).
+"""
+import json
 import os
 import sys
 import numpy as np
 import torch
+import torch.nn as nn
 
-#so we  can import utils(which is in the parent directory) when runingt he solution 
-CURRENT_DIR=os.path.dirname(os.path.abspath(__file__)) #__FILE__ is the path to file solution .py
-sys.path.append(f"{CURRENT_DIR}")
+# CURRENT_DIR = folder containing solution.py (same as submission zip root when submitted).
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, CURRENT_DIR)
+# Utils may be in parent when run from repo.
+if os.path.dirname(CURRENT_DIR) not in sys.path:
+    sys.path.insert(0, os.path.dirname(CURRENT_DIR))
 
-from utils import DataPoint #import DataPoint class from utils.py
+from utils import DataPoint
 
-class LSTMPredictor(nn.Module):  #lstm model
-    def __init__(self,input_size=FEATURES,hidden_size=64,num_layers=1):
+import preprocess
+
+CONTEXT_LEN = 100
+FEATURES_RAW = 32  # raw state from DataPoint; after preprocess we get 97.
+
+
+class LSTMPredictor(nn.Module):
+    """Must match train.py: 2 layers, dropout, input 97, output 2."""
+    def __init__(self, input_size=preprocess.ENGINEERED_FEATURES, hidden_size=64, num_layers=2):
         super().__init__()
-        self.lstm=nn.LSTM(input_size=input_size,hidden_size=hidden_size,num_layers=num_layers,batch_first=True,) #lstm layer
-        # Input = last LSTM hidden state (size 64). Output = 2 numbers (t0 and t1).
-        self.fc=nn.Linear(hidden_size,2)
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=0.2,
+        )
+        self.dropout = nn.Dropout(0.2)
+        self.fc = nn.Linear(hidden_size, 2)
 
-    def forward(self,x): #calling the model #x:input data 
-        #x:(bacth (no. of sequences), seq_len(no. of steps 100 context window),input_size(no. of features 32))
-        _,(h_n,_)=self.lstm(x)
-
-        #h_n:(num_layers, batch,hidden_szie)->take last layer
-        out=self.fc(h_n[-1]) //
-        return out
+    def forward(self, x):
+        _, (h_n, _) = self.lstm(x)
+        h = self.dropout(h_n[-1])
+        return self.fc(h)
 
 
 class PredictionModel:
-    def __init__(self): #self is instance #init is constructor
-        self.current_seq_ix=None
-        self.sequence_history=[]
-        self.model=None
+    """Required by competition: init + predict(data_point) -> None or np.ndarray shape (2,)."""
+
+    def __init__(self):
+        self.current_seq_ix = None
+        self.sequence_history = []
+        self.model = None
+        self.mean = None
+        self.std = None
+        self.rolling_window = preprocess.ROLLING_WINDOW
         self.load_model()
 
-
-   #
     def load_model(self):
-        """Load lstm weights from same directory rule/guidele """
-        weights_path=os.path.join(CURRENT_DIR,"lstm_weights.pth")
+        """Load scale params (for preprocessing) and LSTM weights. Same pipeline as train.py."""
+        scale_path = os.path.join(CURRENT_DIR, "lstm_scale.npz")
+        weights_path = os.path.join(CURRENT_DIR, "lstm_weights.pth")
+        params_path = os.path.join(CURRENT_DIR, "lstm_best_params.json")
+
+        if os.path.exists(scale_path):
+            self.mean, self.std, self.rolling_window = preprocess.load_scale_params(scale_path)
+        else:
+            self.mean = None
+            self.std = None
+
+        hidden_size = 64
+        if os.path.exists(params_path):
+            with open(params_path) as f:
+                best = json.load(f)
+                hidden_size = best.get("hidden_size", 64)
 
         try:
-            self.model=LSTMPredictor()
-            state=torch.load(weights_path,map_location="cpu", weigths_only=True)
-            self.model.laod_state_dict(state)
+            self.model = LSTMPredictor(
+                input_size=preprocess.ENGINEERED_FEATURES,
+                hidden_size=hidden_size,
+                num_layers=2,
+            )
+            state = torch.load(weights_path, map_location="cpu", weights_only=True)
+            self.model.load_state_dict(state)
             self.model.eval()
         except Exception:
-            self.model=None
+            self.model = None
 
+    def predict(self, data_point: DataPoint) -> np.ndarray | None:
+        """Return None when need_prediction is False; else return (t0, t1) as shape (2,) float32."""
+        if not data_point.need_prediction:
+            return None
 
+        # Reset state on new sequence (required by rules).
+        if self.current_seq_ix != data_point.seq_ix:
+            self.current_seq_ix = data_point.seq_ix
+            self.sequence_history = []
 
-def predict(self,data_point:DataPoint)>np.ndarray | None: #fucntion can return either an array or none 
-    #return none when prediction  not needed
-    if not data_point.need_prediction:
-        return None
+        self.sequence_history.append(data_point.state.copy())
 
-    #resetn state on new sequence(seq_ix)
-    if self.current_seq_ix !=data_point.seq_ix: # if  the sequence we were in on the previosu row is differnt that the sequnce this row belong to
-        self.current_seq_ix=data_point.seq_ix
-        self.sequence_history=[] #clear the hisoty list and start with and start with a empty  lsit 
+        if self.model is None:
+            return np.zeros(2, dtype=np.float32)
 
-    self.sequence_history.append(data_point.state.copy())#store the copy
+        # Build last CONTEXT_LEN steps (100 x 32); pad with zeros if shorter.
+        history_window = self.sequence_history[-CONTEXT_LEN:]
+        if len(history_window) < CONTEXT_LEN:
+            pad = [np.zeros(FEATURES_RAW, dtype=np.float32)] * (CONTEXT_LEN - len(history_window))
+            history_window = pad + history_window
+        window = np.array(history_window, dtype=np.float32)
 
-    if self.model is None:
-        return np.zeros(2,dtype=np.float32) #return dummy prediction if model is not loaded
+        # Same preprocessing as training: feature eng + detrend + diff + normalize.
+        if self.mean is not None and self.std is not None:
+            window = preprocess.transform_window(window, self.mean, self.std, self.rolling_window)
 
-    #last contexxtlen (100 steps) for lstm
-    history_window=self.sequence_history[-CONTEXT_LEN:] #last 100 rows 
-    if(len(history_window)<CONTEXT_LEN):#if the history is less than 100, pad with zeros
-        pad=[np.zeros(FEATURES,dtype=np.float32)]*(CONTEXT_LEN-len(history_window)) 
-        history_window=pad+history_window
-
-    x=np.array(history_window,dtype=np.float32)#convert to numpy array
-    x=np.expand_dims(x,axis=0) #add batch dimension
-    with torch.no_grad():
-        t=torch.from_numpy(x)#add batch dimension
-        out=self.model(t)
-    prediction=out[0].numpy().astype(np.float32)
-    return prediction
-        
-
-
-
+        x = torch.from_numpy(window).unsqueeze(0)
+        with torch.no_grad():
+            out = self.model(x)
+        prediction = out[0].numpy().astype(np.float32)
+        return prediction
